@@ -1,0 +1,130 @@
+//   Problema Cahn-Hilliard Anisotropico de sexta ordem nao linear
+//              utilizando a estrategia de Eyre
+
+
+load "hpddm"
+load "PETSc"
+load "metis"
+load "iovtk"
+macro dimension()2// EOM
+include "macro_ddm.idp"
+macro def(i)[i, i#B, i#C, i#D]// EOM
+macro init(i)[i, i, i, i]// EOM
+
+
+real dt    = 1e-6;
+real T     = 2.8e-2; //2.5e-2;
+real eps   = 0.0125;
+real epsinv= 1.0/eps;
+real lambD = 46.0;
+real lambG2= 280.0;
+real kappa = 10.0;
+real eta   = 40.0;
+real cte1  = sqrt(2)*eps;
+real cte   = 1.0/cte1;
+int iMax = int(T/dt);
+
+
+//Caso Aniso_X:
+//real a20   = 1.8e-5;
+//real a02   = 5.0e-6;
+//real a11   = 5.0e-6;
+
+//Caso Aniso_Y:
+//real a20   = 5.0e-6;
+//real a02   = 1.8e-5;
+//real a11   = 5.0e-6;
+
+//Caso Aniso_cross:
+real a20   = 5.0e-6;
+real a02   = 5.0e-6;
+real a11   = 1.8e-5;
+
+/* Parametro da Tecnica de Eyre */
+real a = 3.0;
+
+/* Parametros para geracao da malha */
+real xx0=-0.7, xx1=1.7;
+real yy0=-1.7, yy1=0.7;
+meshN Th = square(1,1);
+
+/* Especifica a cond de contorno */
+int[int] labPeriodic = [1,2,3,4];
+macro Pk() [P1, P1, P1, P1], periodic=[[labPeriodic[0],x], [labPeriodic[2],x], [labPeriodic[1],y], [labPeriodic[3],y]]// EOM
+
+/* Espaco dos Elementos Finitos */
+fespace Vh2(Th, Pk);
+
+int[int][int] intersection;   // local-to-neighbors renumbering
+real[int] D;
+
+
+{
+  Th = square(getARGV("-global", 100), getARGV("-global", 100), [xx0+(xx1-xx0)*x, yy0+(yy1-yy0)*y], flags=1);
+  int s2 = getARGV("-split", 1);
+  buildPeriodic(Th, s2, intersection, D, Pk, mpiCommWorld, labPeriodic)
+}
+
+
+// Funcoes Admissiveis e Teste:
+Vh2 [u,v,p,q],[w,z,r,s],[uold,vold,pold,qold],[phi,psi,phi2,psi2],[ux0,vx0,px0,qx0];
+
+[u,v,p,q] = [-tanh(cte*(sqrt(2*(x-0.5)^2 + 0.25*(y+0.5)^2) - 0.1)), 0, 0, 0];
+
+
+// define o problema (u = valor atual, uold = valor do passo anterior)
+varf CH([u,v,p,q], [phi,psi,phi2,psi2]) = int2d(Th)( u*phi/dt
+						- ( dx(v)*dx(phi) + dy(v)*dy(phi) )
+						+ eps*( dx(u)*dx(psi) + dy(u)*dy(psi) )
+						- a20*eps*dx(p)*dx(psi) - a02*eps*dy(q)*dy(psi)
+						- 0.5*a11*eps*( dy(p)*dy(psi) + dx(q)*dx(psi) )
+						- epsinv*(1-a)*u*psi + v*psi
+						+ p*phi2 + dx(u)*dx(phi2)
+						+ q*psi2 + dy(u)*dy(psi2) );
+
+varf rhs([u,v,p,q], [phi,psi,phi2,psi2]) = int2d(Th)( uold*phi/dt - epsinv*(uold*uold*uold - a*uold)*psi
+	                                    - epsinv*( lambD*(ux0+1) - lambG2*(1-ux0)^2*(1+ux0)^2 )*phi );
+
+
+
+matrix Ma=CH(Vh2,Vh2);
+Mat A(Ma, intersection, D);
+
+exportBegin("anisoMF", mpiCommWorld);
+
+//for (int tt = 0; tt < iMax; tt++) {
+for (int tt = 0; tt < 5; tt++) {
+	    real t = tt*dt;
+	    [uold, vold, pold, qold]=[u, v, p, q];
+	    z[]=uold[];
+
+	    for(int iter=0; iter<20; iter++){
+		      ux0[] = z[];
+	              real[int] rhs2=rhs(0,Vh2);
+
+		      set(A, sparams = "-pc_type lu -pc_factor_mat_solver_type mumps");
+		      u[] = A^-1*rhs2;
+                      w[]=u[];
+
+		      real residuo1, residuo2;
+		      residuo1 = sqrt(int2d(Th, mpirank)((ux0-w)^2));
+		      mpiAllReduce(residuo1,residuo2,mpiCommWorld,mpiSUM);
+
+
+		      cout << iter <<  " ERRO_PARADA = " <<  residuo2  << endl;
+                      if(residuo2 < 1e-5)break;
+                      z[] = w[];
+     }
+
+     u[] = w[];
+
+     int[int] fforder(1);
+     fforder = 1;
+     //if(tt%10==0){
+		exportTimeStep("anisoMF", Th, u, fforder, tt, mpiCommWorld);
+    // }
+
+     cout << "time = " << t << endl;
+
+}
+exportEnd("anisoMF", mpiCommWorld);
